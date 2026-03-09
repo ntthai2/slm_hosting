@@ -1,0 +1,84 @@
+﻿version: "3.9"
+
+services:
+
+  # â”€â”€ 1. vLLM inference engine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  vllm:
+    container_name: vllm-qwen
+    image: vllm/vllm-openai:v0.6.6.post1
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+    volumes:
+      # Mount pre-downloaded model â€” never download inside container!
+      - ../models:/models
+    command: >
+      --model /models/Qwen2.5-1.5B-Instruct-AWQ
+      --tokenizer /models/Qwen2.5-1.5B-Instruct-AWQ
+      --host 0.0.0.0
+      --port 8000
+      --quantization awq
+      --dtype half
+      --gpu-memory-utilization 0.75
+      --max-model-len 2048
+      --max-num-seqs 16
+      --max-num-batched-tokens 2048
+      --enable-prefix-caching
+      --enable-chunked-prefill
+      --swap-space 4
+      --trust-remote-code
+      --disable-log-requests
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: always
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    # vLLM only accessible internally â€” NOT exposed to host
+    expose:
+      - "8000"
+
+  # â”€â”€ 2. FastAPI wrapper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  api:
+    container_name: slm-api
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - VLLM_URL=http://vllm:8000
+      - MODEL_NAME=/models/Qwen2.5-1.5B-Instruct-AWQ
+      - LOG_LEVEL=INFO
+      - REQUEST_TIMEOUT=30
+      - MAX_TOKENS_DEFAULT=512
+      - API_KEY=${API_KEY:-secret-key-change-me}
+    depends_on:
+      vllm:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/v1/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: always
+    expose:
+      - "8080"
+
+  # â”€â”€ 3. Nginx reverse proxy + rate limit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  nginx:
+    container_name: slm-nginx
+    image: nginx:1.25-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: always
